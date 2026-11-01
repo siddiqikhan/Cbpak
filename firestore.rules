@@ -1,0 +1,120 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function ownsDriverProfile(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function approvedDriver() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/drivers/$(request.auth.uid))
+        && get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.status == 'approved';
+    }
+
+    match /admins/{uid} {
+      allow read: if ownsDriverProfile(uid);
+      allow write: if false;
+    }
+
+    match /drivers/{uid} {
+      allow read: if ownsDriverProfile(uid) || isAdmin();
+      allow create: if ownsDriverProfile(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.keys().hasOnly([
+          'uid', 'name', 'phone', 'city', 'vehicleType',
+          'vehicleRegistration', 'status', 'createdAt', 'updatedAt'
+        ]);
+      allow update: if (ownsDriverProfile(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'phone', 'city', 'vehicleType', 'vehicleRegistration', 'updatedAt'
+          ]))
+        || (isAdmin()
+          && resource.data.status == 'pending'
+          && request.resource.data.status == 'approved'
+          && request.resource.data.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']));
+      allow delete: if false;
+    }
+
+    match /requests/{requestId} {
+      allow create: if signedIn()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.keys().hasOnly([
+          'category', 'service', 'vehicleType', 'pickup', 'destination',
+          'fareMode', 'details', 'pickupTime', 'loader', 'paymentMethod',
+          'closedBodyRequired', 'passengerRide', 'cargoDescription', 'priceFlow',
+          'pickupLat', 'pickupLng',
+          'customerId', 'customerName', 'status', 'createdAt', 'updatedAt'
+        ]);
+
+      allow read: if isAdmin() || (signedIn()
+        && (resource.data.customerId == request.auth.uid || approvedDriver()));
+
+      allow update: if (isAdmin()
+            && resource.data.status in ['open', 'accepted']
+            && request.resource.data.status == 'cancelled'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+        || (signedIn()
+        && ((resource.data.customerId == request.auth.uid
+              && resource.data.status == 'open'
+              && request.resource.data.status == 'cancelled'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))
+            || (approvedDriver()
+              && resource.data.status == 'open'
+              && request.resource.data.status == 'accepted'
+              && request.resource.data.driverId == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'driverId', 'acceptedAt', 'updatedAt']))
+            || (approvedDriver()
+              && resource.data.status == 'open'
+              && request.resource.data.status == 'open'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['declinedBy', 'updatedAt'])
+              && request.auth.uid in request.resource.data.declinedBy
+              && !(request.auth.uid in resource.data.get('declinedBy', []))
+              && request.resource.data.declinedBy.hasAll(resource.data.get('declinedBy', []))
+              && request.resource.data.declinedBy.size() == resource.data.get('declinedBy', []).size() + 1)
+            || (approvedDriver()
+              && resource.data.status == 'accepted'
+              && resource.data.driverId == request.auth.uid
+              && request.resource.data.status == 'completed'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']))));
+
+      allow delete: if false;
+    }
+
+    match /rideContacts/{requestId} {
+      allow read: if signedIn()
+        && resource.data.customerId == request.auth.uid
+        && get(/databases/$(database)/documents/requests/$(requestId)).data.status in ['accepted', 'completed'];
+
+      allow create: if approvedDriver()
+        && !exists(/databases/$(database)/documents/rideContacts/$(requestId))
+        && get(/databases/$(database)/documents/requests/$(requestId)).data.status == 'open'
+        && getAfter(/databases/$(database)/documents/requests/$(requestId)).data.status == 'accepted'
+        && getAfter(/databases/$(database)/documents/requests/$(requestId)).data.driverId == request.auth.uid
+        && request.resource.data.customerId == getAfter(/databases/$(database)/documents/requests/$(requestId)).data.customerId
+        && request.resource.data.driverId == request.auth.uid
+        && request.resource.data.driverName == get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.name
+        && request.resource.data.driverPhone == get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.phone
+        && request.resource.data.vehicleType == get(/databases/$(database)/documents/drivers/$(request.auth.uid)).data.vehicleType
+        && request.resource.data.keys().hasOnly(['customerId', 'driverId', 'driverName', 'driverPhone', 'vehicleType']);
+
+      allow update, delete: if false;
+    }
+  }
+}
+
+
